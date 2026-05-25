@@ -1,120 +1,90 @@
 #!/usr/bin/env python3
-"""Insere seções geradas em um arquivo DOCX sem alterar o restante do relatório."""
-
 from __future__ import annotations
-
-import argparse
-import re
-import sys
+import argparse, json, re, sys
 from pathlib import Path
-
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.text.paragraph import CT_P
 from docx.shared import Pt
-
 ABERTURA_CONSIDERACOES = "Conforme as condições em que este ensaio foi realizado podemos concluir que:"
+STYLE_DISC = "FRV_AI_Discussion"
+STYLE_CONS = "FRV_AI_Consideracao"
 
+def parse_args():
+ p=argparse.ArgumentParser(); p.add_argument('--docx-original',type=Path,required=True); p.add_argument('--resultados',type=Path,default=Path('saida/textos_gerados/resultados_discussao.md')); p.add_argument('--consideracoes',type=Path,default=Path('saida/textos_gerados/consideracoes.md')); p.add_argument('--blocos-resultados',type=Path,default=Path('saida/textos_gerados/resultados_discussao_blocos.json')); p.add_argument('--saida-dir',type=Path,default=Path('saida/relatorios_finalizados')); return p.parse_args()
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Substitui conteúdo das seções RESULTADOS E DISCUSSÃO e CONSIDERAÇÕES.")
-    parser.add_argument("--docx-original", type=Path, required=True)
-    parser.add_argument("--resultados", type=Path, default=Path("saida/textos_gerados/resultados_discussao.md"))
-    parser.add_argument("--consideracoes", type=Path, default=Path("saida/textos_gerados/consideracoes.md"))
-    parser.add_argument("--saida-dir", type=Path, default=Path("saida/relatorios_finalizados"))
-    return parser.parse_args()
+def norm(t:str)->str: return re.sub(r'\s+',' ',t or '').strip().upper()
+def carregar(c:Path)->str: return c.read_text(encoding='utf-8').strip()
+def blocos(t:str)->list[str]: return [b.strip() for b in re.split(r'\n\s*\n',t) if b.strip()]
 
+def get_title(doc,titulo):
+ a=norm(titulo)
+ for p in doc.paragraphs:
+  if norm(p.text)==a:return p
+ raise RuntimeError(f"Seção '{titulo}' não encontrada")
 
-def normalizar_titulo(texto: str) -> str:
-    return re.sub(r"\s+", " ", texto or "").strip().upper()
+def ensure_style(doc, name):
+ styles=doc.styles
+ if name in [s.name for s in styles]: return name
+ base=styles['Normal'] if 'Normal' in [s.name for s in styles] else styles[0]
+ st=styles.add_style(name,1); st.base_style=base; return name
 
+def formatar(p):
+ p.alignment=WD_ALIGN_PARAGRAPH.JUSTIFY; f=p.paragraph_format; f.line_spacing=1.5; f.first_line_indent=Pt(24)
 
-def carregar_texto(caminho: Path) -> str:
-    return caminho.read_text(encoding="utf-8").strip()
+def insert_before(doc, anchor_p, texto, estilo):
+ novo=doc.add_paragraph(texto, style=estilo); formatar(novo)
+ parent=anchor_p._element.getparent(); parent.insert(parent.index(anchor_p._element), novo._element)
 
+def remover_estilo_entre(doc, ini, fim, estilos):
+ body=doc._body._element; elems=list(body); i1=elems.index(ini._element); i2=elems.index(fim._element)
+ for el in elems[i1+1:i2]:
+  if isinstance(el, CT_P):
+   p_txt=''.join(el.itertext()).strip()
+   if re.match(r'^(Tabela|Figura|Quadro)\s+\d+', p_txt, re.IGNORECASE):
+    continue
+   p_obj=next((p for p in doc.paragraphs if p._element is el), None)
+   if p_obj and p_obj.style and p_obj.style.name in estilos: el.getparent().remove(el)
 
-def encontrar_paragrafo_por_titulo(doc: Document, titulo: str):
-    alvo = normalizar_titulo(titulo)
-    for p in doc.paragraphs:
-        if normalizar_titulo(p.text) == alvo:
-            return p
-    raise RuntimeError(f"Seção '{titulo}' não encontrada no documento.")
+def substituir_resultados(doc, texto_md, json_blocos):
+ titulo=get_title(doc,'RESULTADOS E DISCUSSÃO'); cons=get_title(doc,'CONSIDERAÇÕES'); ensure_style(doc, STYLE_DISC)
+ remover_estilo_entre(doc, titulo, cons, {STYLE_DISC})
+ body=doc._body._element; elems=list(body); i1=elems.index(titulo._element); i2=elems.index(cons._element)
+ if json_blocos and json_blocos.exists():
+  data=json.loads(json_blocos.read_text(encoding='utf-8')); blocos_res=data.get('blocos_resultados',[])
+  for bloco in blocos_res:
+   padrao=rf"^{bloco.get('tipo_anchor','').capitalize()}\s+{int(bloco.get('numero_anchor',0))}\b"
+   alvo=None
+   for el in elems[i1+1:i2]:
+    if isinstance(el, CT_P):
+     tx=''.join(el.itertext()).strip()
+     if re.match(padrao, tx, re.IGNORECASE): alvo=next((p for p in doc.paragraphs if p._element is el), None); break
+   if alvo and bloco.get('texto','').strip(): insert_before(doc, alvo, bloco['texto'].strip(), STYLE_DISC)
+ else:
+  # fallback: limpa apenas texto antigo antes da 1ª legenda
+  first_anchor=None
+  for el in elems[i1+1:i2]:
+   if isinstance(el, CT_P) and re.match(r'^(Tabela|Figura|Quadro)\s+\d+', ''.join(el.itertext()).strip(), re.IGNORECASE):
+    first_anchor=el; break
+  for el in elems[i1+1:i2]:
+   if el is first_anchor: break
+   if isinstance(el, CT_P): el.getparent().remove(el)
+  anchor_p=next((p for p in doc.paragraphs if p._element is first_anchor), cons)
+  for b in reversed(blocos(texto_md)): insert_before(doc, anchor_p, b, STYLE_DISC)
 
+def substituir_consideracoes(doc, texto):
+ t=get_title(doc,'CONSIDERAÇÕES'); r=get_title(doc,'REFERÊNCIAS BIBLIOGRÁFICAS'); ensure_style(doc, STYLE_CONS)
+ body=doc._body._element; elems=list(body); i1=elems.index(t._element); i2=elems.index(r._element)
+ for el in elems[i1+1:i2]: el.getparent().remove(el)
+ bs=blocos(texto)
+ if not bs or bs[0]!=ABERTURA_CONSIDERACOES: bs=[ABERTURA_CONSIDERACOES]+([""] if bs else [])+bs
+ for b in reversed([x for x in bs if x.strip()]): insert_before(doc, r, b, STYLE_CONS)
 
-def aplicar_formatacao(paragrafo) -> None:
-    fmt = paragrafo.paragraph_format
-    paragrafo.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-    fmt.line_spacing = 1.5
-    fmt.first_line_indent = Pt(24)
-
-
-def inserir_paragrafos_apos(doc: Document, paragrafo_base, blocos: list[str]) -> None:
-    parent = paragrafo_base._element.getparent()
-    anchor = paragrafo_base._element
-    for bloco in reversed(blocos):
-        novo = doc.add_paragraph(bloco)
-        aplicar_formatacao(novo)
-        parent.insert(parent.index(anchor) + 1, novo._element)
-
-
-def blocos_paragrafos(texto: str) -> list[str]:
-    return [b.strip() for b in re.split(r"\n\s*\n", texto) if b.strip()]
-
-
-def substituir_resultados_discussao(doc: Document, texto: str) -> None:
-    titulo = encontrar_paragrafo_por_titulo(doc, "RESULTADOS E DISCUSSÃO")
-    body = doc._body._element
-    idx_titulo = list(body).index(titulo._element)
-
-    remover = []
-    for el in list(body)[idx_titulo + 1 :]:
-        if isinstance(el, CT_P):
-            txt = "".join(el.itertext()).strip()
-            if normalizar_titulo(txt) in {"CONSIDERAÇÕES", "REFERÊNCIAS BIBLIOGRÁFICAS"}:
-                break
-            remover.append(el)
-            continue
-        break
-
-    for el in remover:
-        el.getparent().remove(el)
-
-    inserir_paragrafos_apos(doc, titulo, blocos_paragrafos(texto))
-
-
-def substituir_consideracoes(doc: Document, texto: str) -> None:
-    titulo = encontrar_paragrafo_por_titulo(doc, "CONSIDERAÇÕES")
-    ref = encontrar_paragrafo_por_titulo(doc, "REFERÊNCIAS BIBLIOGRÁFICAS")
-    body = doc._body._element
-    elems = list(body)
-    i1, i2 = elems.index(titulo._element), elems.index(ref._element)
-
-    for el in elems[i1 + 1 : i2]:
-        el.getparent().remove(el)
-
-    blocos = blocos_paragrafos(texto)
-    if not blocos:
-        blocos = [ABERTURA_CONSIDERACOES]
-    inserir_paragrafos_apos(doc, titulo, blocos)
-
-
-def main() -> int:
-    args = parse_args()
-    try:
-        texto_resultados = carregar_texto(args.resultados)
-        texto_consideracoes = carregar_texto(args.consideracoes)
-        doc = Document(args.docx_original)
-        substituir_resultados_discussao(doc, texto_resultados)
-        substituir_consideracoes(doc, texto_consideracoes)
-        args.saida_dir.mkdir(parents=True, exist_ok=True)
-        saida = args.saida_dir / f"{args.docx_original.stem}_final.docx"
-        doc.save(saida)
-    except Exception as exc:  # noqa: BLE001
-        print(f"Erro ao processar DOCX: {exc}", file=sys.stderr)
-        return 1
-    print(f"Relatório final salvo em: {saida}")
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+def main():
+ a=parse_args()
+ try:
+  doc=Document(a.docx_original); substituir_resultados(doc, carregar(a.resultados), a.blocos_resultados if a.blocos_resultados.exists() else None); substituir_consideracoes(doc, carregar(a.consideracoes)); a.saida_dir.mkdir(parents=True, exist_ok=True); out=a.saida_dir/f"{a.docx_original.stem}_final.docx"; doc.save(out)
+ except Exception as e:
+  print(f"Erro ao processar DOCX: {e}", file=sys.stderr); return 1
+ print(f"Relatório final salvo em: {out}"); return 0
+if __name__=='__main__': raise SystemExit(main())

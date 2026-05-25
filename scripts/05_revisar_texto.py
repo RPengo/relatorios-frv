@@ -67,6 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dados-relatorio", type=Path, default=Path("entrada/tabelas_extraidas/tabelas_extraidas.json"))
     parser.add_argument("--classificacao", type=Path, default=Path("saida/logs_revisao/classificacao_estatistica.json"))
     parser.add_argument("--resultados", type=Path, default=Path("saida/textos_gerados/resultados_discussao.md"))
+    parser.add_argument("--blocos-resultados", type=Path, default=Path("saida/textos_gerados/resultados_discussao_blocos.json"))
     parser.add_argument("--consideracoes", type=Path, default=Path("saida/textos_gerados/consideracoes.md"))
     parser.add_argument("--saida", type=Path, default=Path("saida/logs_revisao/revisao_tecnica.md"))
     parser.add_argument("--modelo", default="gpt-4.1-mini")
@@ -161,6 +162,35 @@ def validar_regras_fixas(resultados: str, consideracoes: str, dados_relatorio: d
 
     return erros
 
+
+
+def validar_blocos_json(caminho: Path, dados_relatorio: dict[str, Any]) -> list[str]:
+    erros=[]
+    if not caminho.exists():
+        return ["Arquivo resultados_discussao_blocos.json não encontrado."]
+    data=json.loads(caminho.read_text(encoding="utf-8"))
+    blocos=data.get("blocos_resultados") or []
+    if not blocos: erros.append("resultados_discussao_blocos.json sem blocos_resultados.")
+    texto_base=json.dumps(dados_relatorio, ensure_ascii=False).lower()
+    if len(blocos)==1 and len(re.findall(r"tabela\s*\d+", texto_base))>=2:
+        erros.append("Há bloco único genérico para múltiplas tabelas.")
+    for b in blocos:
+        anc=f"{b.get('tipo_anchor','').lower()} {b.get('numero_anchor','')}"
+        if anc.strip() not in texto_base:
+            erros.append(f"Bloco sem anchor existente no relatório: {anc}.")
+    return erros
+
+
+def validar_decimais(resultados: str) -> list[str]:
+    erros=[]
+    if re.search(r"cerca de\s+\d+\s*sc\s*ha", resultados.lower()):
+        erros.append("Uso de 'cerca de X sc ha⁻¹' detectado; usar valor com casas decimais da tabela.")
+    for m in re.finditer(r"(\d+)[\.,](\d+)\s*sc\s*ha", resultados.lower()):
+        if len(m.group(2)) != 1:
+            erros.append("Diferença numérica em sc ha⁻¹ fora de 1 casa decimal.")
+            break
+    return erros
+
 def classificar_status(criticas: list[str], moderadas: list[str]) -> str:
     return "reprovado" if criticas else ("aprovado com ressalvas" if moderadas else "aprovado")
 
@@ -174,6 +204,8 @@ def main() -> int:
         texto_unificado = f"## Resultados e Discussão\n{texto_resultados}\n\n## Considerações\n{texto_consideracoes}".strip()
 
         criticas = validar_regras_fixas(texto_resultados, texto_consideracoes, dados_relatorio, classificacao)
+        criticas.extend(validar_blocos_json(args.blocos_resultados, dados_relatorio))
+        criticas.extend(validar_decimais(texto_resultados))
 
         llm = revisar_com_llm(args.modelo, dados_relatorio, classificacao, texto_unificado)
         criticas.extend(llm.get("correcoes_obrigatorias", []))
