@@ -1,0 +1,13 @@
+# Ambientes virtuais
+.venv/
+venv/
+
+# Saídas e artefatos gerados
+entrada/tabelas_extraidas/
+saida/logs_revisao/
+saida/textos_gerados/
+saida/relatorios_finalizados/
+
+# Arquivos temporários
+__pycache__/
+*.pyc
