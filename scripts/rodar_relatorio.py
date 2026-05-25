@@ -42,6 +42,10 @@ def extrair_status_revisao(caminho_revisao: Path) -> str:
     )
 
 
+def precisa_correcao(caminho_revisao: Path) -> bool:
+    txt = caminho_revisao.read_text(encoding="utf-8")
+    return "### Erros corrigíveis automaticamente" in txt
+
 def main() -> int:
     args = parse_args()
 
@@ -68,6 +72,9 @@ def main() -> int:
         for comando, descricao in etapas:
             executar_etapa(comando, descricao)
 
+        if precisa_correcao(revisao_path):
+            executar_etapa([sys.executable, "scripts/04_gerar_texto.py"], "04b - Regenerar texto (tentativa única)")
+            executar_etapa([sys.executable, "scripts/05_revisar_texto.py"], "05b - Revisar texto (pós-correção)")
         status = extrair_status_revisao(revisao_path)
         print(f"\nClassificação final da revisão: {status}")
 

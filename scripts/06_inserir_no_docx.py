@@ -72,13 +72,29 @@ def substituir_resultados(doc, texto_md, json_blocos):
   anchor_p=next((p for p in doc.paragraphs if p._element is first_anchor), cons)
   for b in reversed(blocos(texto_md)): insert_before(doc, anchor_p, b, STYLE_DISC)
 
+def _normalizar_consideracoes_texto(texto: str) -> list[str]:
+ linhas=[l.strip() for l in texto.splitlines() if l.strip()]
+ limpas=[]
+ for l in linhas:
+  l=re.sub(r"^[-•]+\s*", "", l)
+  if l.lower().startswith(ABERTURA_CONSIDERACOES.lower()):
+   continue
+  limpas.append(l)
+ out=[ABERTURA_CONSIDERACOES]
+ for i,l in enumerate(limpas):
+  if not l.startswith("- "): l=f"- {l}"
+  corpo=l[2:].rstrip(";.")
+  sufixo = ";" if i < len(limpas)-1 else "."
+  l=f"- {corpo}{sufixo}"
+  out.append(l)
+ return out
+
 def substituir_consideracoes(doc, texto):
  t=get_title(doc,'CONSIDERAÇÕES'); r=get_title(doc,'REFERÊNCIAS BIBLIOGRÁFICAS'); ensure_style(doc, STYLE_CONS)
  body=doc._body._element; elems=list(body); i1=elems.index(t._element); i2=elems.index(r._element)
  for el in elems[i1+1:i2]: el.getparent().remove(el)
- bs=blocos(texto)
- if not bs or bs[0]!=ABERTURA_CONSIDERACOES: bs=[ABERTURA_CONSIDERACOES]+([""] if bs else [])+bs
- for b in reversed([x for x in bs if x.strip()]): insert_before(doc, r, b, STYLE_CONS)
+ bs=_normalizar_consideracoes_texto(texto)
+ for b in reversed(bs): insert_before(doc, r, b, STYLE_CONS)
 
 def main():
  a=parse_args()
