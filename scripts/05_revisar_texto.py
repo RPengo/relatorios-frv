@@ -179,7 +179,7 @@ def validar_blocos_json(caminho: Path, dados_relatorio: dict[str, Any]) -> list[
         anc=f"{b.get('tipo_anchor','').lower()} {b.get('numero_anchor','')}"
         if anc.strip() not in texto_base:
             erros.append(f"Bloco sem anchor existente no relatório: {anc}.")
-    return erros_criticos, erros_corrigiveis
+    return erros
 
 
 def validar_decimais(resultados: str) -> list[str]:
@@ -190,7 +190,7 @@ def validar_decimais(resultados: str) -> list[str]:
         if len(m.group(2)) != 1:
             erros.append("Diferença numérica em sc ha⁻¹ fora de 1 casa decimal.")
             break
-    return erros_criticos, erros_corrigiveis
+    return erros
 
 def classificar_status(criticas: list[str], moderadas: list[str]) -> str:
     return "reprovado" if criticas else ("aprovado com ressalvas" if moderadas else "aprovado")
