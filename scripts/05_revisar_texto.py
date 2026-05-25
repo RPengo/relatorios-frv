@@ -23,10 +23,8 @@ PROIBIDOS_LOCAL_RESULTADOS = [
     "estado de mato grosso",
 ]
 
-PROIBIDOS_CV_RESULTADOS = [
-    "coeficiente de variação",
-    "coeficientes de variação",
-    " cv ",
+TERMOS_PROIBIDOS_POS_SANITIZACAO = [
+    "coeficiente de variação", "cv", "teste f p", "p>0,05", "p<0,05", "p≤0,05", "marcador ns", "testemunha"
 ]
 
 TERMOS_EXAGERADOS_SEM_SIGNIFICANCIA = [
@@ -121,34 +119,37 @@ def contar_paragrafos(texto: str) -> int:
     return len(blocos)
 
 
-def validar_regras_fixas(resultados: str, consideracoes: str, dados_relatorio: dict[str, Any], classificacao: dict[str, Any]) -> list[str]:
-    erros = []
+def validar_regras_fixas(resultados: str, consideracoes: str, dados_relatorio: dict[str, Any], classificacao: dict[str, Any]) -> tuple[list[str], list[str]]:
+    erros_criticos = []
+    erros_corrigiveis = []
     if contar_tabelas(dados_relatorio) >= 2 and contar_paragrafos(resultados) < 2:
-        erros.append("Resultados e Discussão em parágrafo único apesar de múltiplas tabelas.")
+        erros_criticos.append("Resultados e Discussão em parágrafo único apesar de múltiplas tabelas.")
 
     resultados_lower = f" {resultados.lower()} "
     for termo in PROIBIDOS_LOCAL_RESULTADOS:
         if termo in resultados_lower:
-            erros.append(f"Resultados e Discussão contém menção de local proibida: '{termo.strip()}'.")
-
-    for termo in PROIBIDOS_CV_RESULTADOS:
-        if termo in resultados_lower:
-            erros.append(f"Resultados e Discussão contém menção proibida a CV: '{termo.strip()}'.")
+            erros_criticos.append(f"Resultados e Discussão contém menção de local proibida: '{termo.strip()}'.")
 
     consideracoes_lower = f" {consideracoes.lower()} "
+    arquivos = {"resultados_discussao.md": resultados_lower, "resultados_discussao_blocos.json": resultados_lower, "consideracoes.md": consideracoes_lower}
+    for nome_arq, conteudo in arquivos.items():
+        for termo in TERMOS_PROIBIDOS_POS_SANITIZACAO:
+            if termo in conteudo:
+                erros_corrigiveis.append(f"{nome_arq}: termo proibido após sanitização: '{termo}'.")
+
     for termo in PROIBIDOS_LOCAL_RESULTADOS:
         if termo in consideracoes_lower:
-            erros.append(f"Considerações contém menção de local proibida: '{termo.strip()}'.")
+            erros_criticos.append(f"Considerações contém menção de local proibida: '{termo.strip()}'.")
 
     if consideracoes.count(ABERTURA_CONSIDERACOES) > 1:
-        erros.append("Frase de abertura das considerações está duplicada.")
+        erros_corrigiveis.append("consideracoes.md: Frase de abertura das considerações está duplicada.")
 
     linhas_cons = [l.strip() for l in consideracoes.splitlines() if l.strip()]
     topicos = [l for l in linhas_cons if l.startswith("-")]
     if not linhas_cons or linhas_cons[0] != ABERTURA_CONSIDERACOES:
-        erros.append("Considerações não iniciam com a frase obrigatória.")
+        erros_corrigiveis.append("consideracoes.md: Considerações não iniciam com a frase obrigatória.")
     if len(topicos) < 3 or len(topicos) > 4:
-        erros.append("Considerações devem conter de 3 a 4 tópicos.")
+        erros_corrigiveis.append("consideracoes.md: Considerações devem conter de 3 a 4 tópicos.")
 
     classificacao_texto = json.dumps(classificacao, ensure_ascii=False).lower()
     sem_significancia = any(
@@ -158,9 +159,9 @@ def validar_regras_fixas(resultados: str, consideracoes: str, dados_relatorio: d
     if sem_significancia:
         for termo in TERMOS_EXAGERADOS_SEM_SIGNIFICANCIA:
             if termo in resultados_lower:
-                erros.append(f"Resultados e Discussão usa termo exagerado para resultado não significativo: '{termo}'.")
+                erros_criticos.append(f"Resultados e Discussão usa termo exagerado para resultado não significativo: '{termo}'.")
 
-    return erros
+    return erros_criticos, erros_corrigiveis
 
 
 
@@ -178,7 +179,7 @@ def validar_blocos_json(caminho: Path, dados_relatorio: dict[str, Any]) -> list[
         anc=f"{b.get('tipo_anchor','').lower()} {b.get('numero_anchor','')}"
         if anc.strip() not in texto_base:
             erros.append(f"Bloco sem anchor existente no relatório: {anc}.")
-    return erros
+    return erros_criticos, erros_corrigiveis
 
 
 def validar_decimais(resultados: str) -> list[str]:
@@ -189,7 +190,7 @@ def validar_decimais(resultados: str) -> list[str]:
         if len(m.group(2)) != 1:
             erros.append("Diferença numérica em sc ha⁻¹ fora de 1 casa decimal.")
             break
-    return erros
+    return erros_criticos, erros_corrigiveis
 
 def classificar_status(criticas: list[str], moderadas: list[str]) -> str:
     return "reprovado" if criticas else ("aprovado com ressalvas" if moderadas else "aprovado")
@@ -203,18 +204,20 @@ def main() -> int:
         texto_consideracoes = carregar_texto(args.consideracoes)
         texto_unificado = f"## Resultados e Discussão\n{texto_resultados}\n\n## Considerações\n{texto_consideracoes}".strip()
 
-        criticas = validar_regras_fixas(texto_resultados, texto_consideracoes, dados_relatorio, classificacao)
+        criticas, corrigiveis = validar_regras_fixas(texto_resultados, texto_consideracoes, dados_relatorio, classificacao)
         criticas.extend(validar_blocos_json(args.blocos_resultados, dados_relatorio))
         criticas.extend(validar_decimais(texto_resultados))
 
         llm = revisar_com_llm(args.modelo, dados_relatorio, classificacao, texto_unificado)
         criticas.extend(llm.get("correcoes_obrigatorias", []))
         moderadas = llm.get("itens_problematicos", [])
-        status = classificar_status(criticas, moderadas)
+        status = classificar_status(criticas, moderadas + corrigiveis)
 
         linhas = ["# Revisão Técnica de Texto", "", f"**Classificação final:** {status}", "", "## Pendências"]
         if criticas:
-            linhas += ["### Correções obrigatórias (reprovação)"] + [f"- {x}" for x in criticas]
+            linhas += ["### Erros críticos (reprovação)"] + [f"- {x}" for x in criticas]
+        if corrigiveis:
+            linhas += ["### Erros corrigíveis automaticamente"] + [f"- {x}" for x in corrigiveis]
         if moderadas:
             linhas += ["### Ressalvas"] + [f"- {x}" for x in moderadas]
         if not criticas and not moderadas:

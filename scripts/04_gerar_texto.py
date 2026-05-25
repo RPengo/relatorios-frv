@@ -13,6 +13,55 @@ from openai import OpenAI
 
 ABERTURA_CONSIDERACOES = "Conforme as condições em que este ensaio foi realizado podemos concluir que:"
 
+
+PROIBIDOS_RESULTADOS_DISCUSS = [
+    "teste f", "p>0,05", "p<0,05", "p≤0,05", "p<=0,05",
+    "marcador ns", "presença do marcador ns", "indicado por ns",
+    "coeficiente de variação", "coeficientes de variação", " boa precisão",
+    "precisão dos dados", "variabilidade experimental", "margem da variabilidade experimental",
+]
+
+
+def normalizar_texto_gerado(texto: str) -> str:
+    txt = (texto or "").replace("\r\n", "\n")
+    txt = re.sub(r"\btestemunha\b", "Controle", txt, flags=re.IGNORECASE)
+    txt = re.sub(r"\bcontrole\b", "Controle", txt)
+    txt = re.sub(r"\((?:teste\s*f\s*)?[pP]\s*[><≤=]\s*0,05\)", "", txt)
+    txt = re.sub(r",?\s*indicad[ao]s?\s+pelo?\s+marcador\s+ns\.?", ".", txt, flags=re.IGNORECASE)
+    txt = re.sub(r",?\s*presença\s+do\s+marcador\s+ns\.?", ".", txt, flags=re.IGNORECASE)
+
+    frases = re.split(r"(?<=[.!?])\s+", txt)
+    limpas = []
+    for f in frases:
+        fl = f.lower()
+        if any(t in fl for t in PROIBIDOS_RESULTADOS_DISCUSS):
+            continue
+        limpas.append(f)
+    txt = " ".join(limpas)
+
+    txt = re.sub(r"\s+([,.;:!?])", r"\1", txt)
+    txt = re.sub(r"([.;:!?])(?!\s|$)", r"\1 ", txt)
+    txt = re.sub(r"\s{2,}", " ", txt)
+    txt = re.sub(r"\.\s*\.", ".", txt)
+    txt = re.sub(r"\bA\s+Controle\b", "O Controle", txt)
+    if "Na Tabela" in (texto or "") and "Na Tabela" not in txt:
+        m = re.search(r"(Na Tabela\s+\d+,[^.]*diferença[^.]*)", texto or "", flags=re.IGNORECASE)
+        if m:
+            cab = re.sub(r"\((?:teste\s*f\s*)?[pP]\s*[><≤=]\s*0,05\)", "", m.group(1), flags=re.IGNORECASE)
+            cab = re.sub(r",?\s*indicad[ao]s?\s+pelo?\s+marcador\s+ns", "", cab, flags=re.IGNORECASE).strip(" ,;.")
+            txt = f"{cab}. {txt}".strip()
+    return txt.strip()
+
+
+def normalizar_consideracoes(topicos: list[str]) -> list[str]:
+    itens = [str(t).strip(' -\t\n') for t in topicos if str(t).strip()]
+    saida = []
+    for i, it in enumerate(itens):
+        t = re.sub(r"[;.]$", "", it.strip())
+        t += "." if i == len(itens)-1 else ";"
+        saida.append(t)
+    return saida
+
 SCHEMA_SAIDA = {
     "name": "texto_relatorio",
     "schema": {
@@ -95,8 +144,11 @@ def montar_prompt(dados_relatorio: dict[str, Any], classificacao: dict[str, Any]
         "Gere RESULTADOS E DISCUSSÃO por blocos vinculados a tabela/figura/quadro. "
         "Cada bloco deve discutir apenas variáveis daquele anchor. "
         "Nunca gerar discussão geral única quando houver múltiplas tabelas. "
-        "Nunca citar cidade/local. Nunca discutir CV. "
-        "Se não houver diferença estatística, explicitar isso e usar 'diferença numérica', 'incremento numérico' ou 'tendência numérica'. "
+        "Nunca citar cidade/local. "
+        "PROIBIDO em Resultados e Discussão: teste F; p>0,05; p<0,05; P>0,05; P<0,05; P≤0,05; marcador ns; presença do marcador ns; indicado por ns; ns; coeficiente de variação; coeficientes de variação; CV; precisão dos dados; boa precisão experimental; variabilidade experimental como justificativa; margem da variabilidade experimental; testemunha. "
+        "Se não houver diferença estatística, escrever apenas 'não houve diferença estatisticamente significativa' e usar 'diferença numérica', 'incremento numérico' ou 'tendência numérica'. "
+        "Não explicar marcadores estatísticos da tabela e não mencionar teste F ou p-valor no corpo da discussão. "
+        "Usar sempre 'Controle' (C maiúsculo), nunca 'testemunha'. "
         "Nunca use termos promocionais. "
         "Ao citar diferenças numéricas, respeite casas decimais da variável e use vírgula decimal. "
         "Para produtividade, prefira sc ha⁻¹ e use insights_calculados quando disponíveis. "
@@ -115,12 +167,16 @@ def gerar_textos(modelo: str, prompt: str) -> dict[str, Any]:
 
 def salvar_resultados(c: Path, blocos: list[dict[str, Any]]):
     c.parent.mkdir(parents=True, exist_ok=True)
+    for b in blocos:
+        if b.get("texto"):
+            b["texto"] = normalizar_texto_gerado(str(b["texto"]))
     texto = "\n\n".join(b.get("texto", "").strip() for b in blocos if b.get("texto", "").strip())
     c.write_text(texto.strip()+"\n", encoding='utf-8')
 
 def salvar_consideracoes(c: Path, tops: list[str]):
     c.parent.mkdir(parents=True, exist_ok=True)
-    linhas=[ABERTURA_CONSIDERACOES,"",*[f"- {str(t).strip(' -\t\n')}" for t in tops if str(t).strip()]]
+    norm = normalizar_consideracoes(tops)
+    linhas=[ABERTURA_CONSIDERACOES,"",*[f"- {t}" for t in norm]]
     c.write_text("\n".join(linhas).strip()+"\n", encoding='utf-8')
 
 def main() -> int:
@@ -132,6 +188,9 @@ def main() -> int:
         saida = gerar_textos(a.modelo, montar_prompt(dados, cls, base))
         blocos = saida.get('blocos_resultados') or []
         if not blocos: raise RuntimeError("Campo 'blocos_resultados' retornou vazio.")
+        for bloco in blocos:
+            if bloco.get("texto"):
+                bloco["texto"] = normalizar_texto_gerado(str(bloco["texto"]))
         a.saida_blocos.parent.mkdir(parents=True, exist_ok=True)
         a.saida_blocos.write_text(json.dumps({"blocos_resultados": blocos, "consideracoes_topicos": saida.get('consideracoes_topicos', [])}, ensure_ascii=False, indent=2)+"\n", encoding='utf-8')
         salvar_resultados(a.saida_resultados, blocos)
