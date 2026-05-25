@@ -22,6 +22,8 @@ SCHEMA_SAIDA = {
             "consideracoes_topicos": {
                 "type": "array",
                 "items": {"type": "string"},
+                "minItems": 3,
+                "maxItems": 4,
             },
         },
         "required": ["resultados_discussao", "consideracoes_topicos"],
@@ -29,46 +31,19 @@ SCHEMA_SAIDA = {
     "strict": True,
 }
 
+ABERTURA_CONSIDERACOES = "Conforme as condições em que este ensaio foi realizado podemos concluir que:"
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Gera textos técnicos de Resultados e Discussão e Considerações."
     )
-    parser.add_argument(
-        "--dados-relatorio",
-        type=Path,
-        default=Path("entrada/tabelas_extraidas/tabelas_extraidas.json"),
-        help="JSON extraído do relatório (padrão: entrada/tabelas_extraidas/tabelas_extraidas.json).",
-    )
-    parser.add_argument(
-        "--classificacao",
-        type=Path,
-        default=Path("saida/logs_revisao/classificacao_estatistica.json"),
-        help="JSON de classificação estatística (padrão: saida/logs_revisao/classificacao_estatistica.json).",
-    )
-    parser.add_argument(
-        "--trechos-base",
-        type=Path,
-        default=Path("saida/logs_revisao/trechos_base_recuperados.md"),
-        help="Trechos recuperados da base (padrão: saida/logs_revisao/trechos_base_recuperados.md).",
-    )
-    parser.add_argument(
-        "--saida-resultados",
-        type=Path,
-        default=Path("saida/textos_gerados/resultados_discussao.md"),
-        help="Arquivo de saída de Resultados e Discussão.",
-    )
-    parser.add_argument(
-        "--saida-consideracoes",
-        type=Path,
-        default=Path("saida/textos_gerados/consideracoes.md"),
-        help="Arquivo de saída de Considerações.",
-    )
-    parser.add_argument(
-        "--modelo",
-        default="gpt-4.1-mini",
-        help="Modelo OpenAI para geração de texto (padrão: gpt-4.1-mini).",
-    )
+    parser.add_argument("--dados-relatorio", type=Path, default=Path("entrada/tabelas_extraidas/tabelas_extraidas.json"))
+    parser.add_argument("--classificacao", type=Path, default=Path("saida/logs_revisao/classificacao_estatistica.json"))
+    parser.add_argument("--trechos-base", type=Path, default=Path("saida/logs_revisao/trechos_base_recuperados.md"))
+    parser.add_argument("--saida-resultados", type=Path, default=Path("saida/textos_gerados/resultados_discussao.md"))
+    parser.add_argument("--saida-consideracoes", type=Path, default=Path("saida/textos_gerados/consideracoes.md"))
+    parser.add_argument("--modelo", default="gpt-4.1-mini")
     return parser.parse_args()
 
 
@@ -92,13 +67,20 @@ def montar_prompt(dados_relatorio: dict[str, Any], classificacao: dict[str, Any]
         "Gere APENAS dois conteúdos: (1) RESULTADOS E DISCUSSÃO e (2) CONSIDERAÇÕES em tópicos. "
         "Use exclusivamente as informações presentes nos insumos fornecidos. "
         "NUNCA invente dados, valores, tratamentos, conclusões ou referências. "
-        "NUNCA afirme diferença estatística quando tabela/insumo indicar 'ns'. "
-        "Separe explicitamente tendência numérica de efeito estatisticamente significativo. "
-        "Quando houver efeito significativo, descreva com linguagem técnica e cite as tabelas no texto "
-        "(ex.: Tabela 1, Tabela 2). "
-        "Quando não houver significância, deixe claro que variações observadas são apenas numéricas. "
-        "Adote português brasileiro, tom técnico, objetivo, impessoal e compatível com estilo Fundação Rio Verde. "
-        "As CONSIDERAÇÕES devem ser curtas, acionáveis e em lista de tópicos."
+        "NUNCA afirme diferença estatística quando tabela/insumo indicar ausência de significância. "
+        "A seção RESULTADOS E DISCUSSÃO deve ser separada em múltiplos parágrafos reais e seguir a ordem das tabelas. "
+        "Se houver duas tabelas de resultados, gere no mínimo 2 parágrafos (idealmente um por tabela). "
+        "Se houver figura de produtividade, um terceiro parágrafo curto é opcional. "
+        "NÃO citar cidade/local na discussão (proibido: Lucas do Rio Verde, Lucas do Rio Verde – MT). "
+        "NÃO discutir CV/coefficientes/robustez/consistência com base em CV. "
+        "Quando produtividade não tiver diferença estatística, declarar explicitamente isso e analisar tendência/diferença numérica. "
+        "Sempre que os dados permitirem, calcular dinamicamente ganhos numéricos vs controle em sc ha⁻¹ e também em kg ha⁻¹; "
+        "jamais chamar isso de ganho significativo. "
+        "Use termos como 'não houve diferença estatística', 'diferença numérica', 'incremento numérico' e 'tendência numérica'. "
+        "Evite linguagem promocional ou genérica sem suporte experimental. "
+        "As CONSIDERAÇÕES devem começar exatamente com a frase: "
+        f"'{ABERTURA_CONSIDERACOES}'. "
+        "Depois gerar 3 ou 4 tópicos técnicos curtos e sem extrapolação comercial ampla."
     )
 
     return (
@@ -110,8 +92,8 @@ def montar_prompt(dados_relatorio: dict[str, Any], classificacao: dict[str, Any]
         "INSUMO 3 - Trechos recuperados da base:\n"
         f"{trechos_base}\n\n"
         "Formato esperado:\n"
-        "- resultados_discussao: texto corrido com parágrafos e citação de tabelas.\n"
-        "- consideracoes_topicos: array de tópicos SEM numeração automática."
+        "- resultados_discussao: texto com múltiplos parágrafos separados por linha em branco.\n"
+        "- consideracoes_topicos: array de 3 a 4 tópicos SEM numeração e SEM repetir a frase de abertura."
     )
 
 
@@ -147,7 +129,8 @@ def salvar_resultados(caminho: Path, texto: str) -> None:
 
 def salvar_consideracoes(caminho: Path, topicos: list[str]) -> None:
     caminho.parent.mkdir(parents=True, exist_ok=True)
-    linhas = [f"- {topico.strip()}" for topico in topicos if str(topico).strip()]
+    topicos_limpos = [str(topico).strip(" -\t\n") for topico in topicos if str(topico).strip()]
+    linhas = [ABERTURA_CONSIDERACOES, ""] + [f"- {topico}" for topico in topicos_limpos]
     caminho.write_text("\n".join(linhas).strip() + "\n", encoding="utf-8")
 
 
