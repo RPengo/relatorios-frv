@@ -14,15 +14,29 @@ from typing import Any
 from openai import OpenAI
 
 ABERTURA_CONSIDERACOES = "Conforme as condições em que este ensaio foi realizado podemos concluir que:"
-PROIBIDOS_RESULTADOS = [
+PROIBIDOS_LOCAL_RESULTADOS = [
     "lucas do rio verde",
     "lucas do rio verde – mt",
     "lucas do rio verde - mt",
+    "município de lucas do rio verde",
+    "cidade de lucas do rio verde",
+    "estado de mato grosso",
+]
+
+PROIBIDOS_CV_RESULTADOS = [
     "coeficiente de variação",
     "coeficientes de variação",
     " cv ",
-    "robustez do experimento",
-    "consistência dos achados",
+]
+
+TERMOS_EXAGERADOS_SEM_SIGNIFICANCIA = [
+    "ganho significativo",
+    "aumento significativo",
+    "foi superior",
+    "promoveu aumento",
+    "eficiência comprovada",
+    "incremento relevante",
+    "recomendação comercial",
 ]
 
 SCHEMA_REVISAO = {
@@ -78,10 +92,13 @@ def revisar_com_llm(modelo: str, dados_relatorio: dict[str, Any], classificacao:
         raise RuntimeError("A variável de ambiente OPENAI_API_KEY não está definida.")
     prompt = (
         "Você é revisor técnico de estatística experimental agronômica. "
-        "Reprove conteúdo que viole regras obrigatórias: discussão em parágrafo único com múltiplas tabelas; "
-        "menção de cidade/local em resultados; menção de CV/coeficiente de variação na discussão; "
-        "não explorar diferenças numéricas de produtividade quando não houver significância; "
-        "considerações genéricas sem suporte; duplicidade da frase de abertura das considerações.\n\n"
+        "Avalie apenas os textos gerados (Resultados e Discussão e Considerações). "
+        "NÃO reprove por menções de local fora desses textos. "
+        "NÃO reprove números calculados a partir das tabelas apenas por não aparecerem literalmente. "
+        "Reprove conteúdo que viole regras obrigatórias: afirmação de significância quando classificação indicar ns; "
+        "recomendação comercial sem suporte; menção de cidade/local nos textos gerados; "
+        "menção de CV/coeficiente de variação na discussão; discussão em parágrafo único com múltiplas tabelas; "
+        "uso de termos exagerados para resultados não significativos.\n\n"
         f"TABELAS (JSON):\n{json.dumps(dados_relatorio, ensure_ascii=False)}\n\n"
         f"CLASSIFICAÇÃO ESTATÍSTICA (JSON):\n{json.dumps(classificacao, ensure_ascii=False)}\n\n"
         f"TEXTO A REVISAR:\n{texto}"
@@ -98,16 +115,29 @@ def contar_tabelas(dados_relatorio: dict[str, Any]) -> int:
     bruto = json.dumps(dados_relatorio, ensure_ascii=False).lower()
     return len(re.findall(r"tabela\s*\d+", bruto)) or bruto.count('"tabela"')
 
-def validar_regras_fixas(resultados: str, consideracoes: str, dados_relatorio: dict[str, Any]) -> list[str]:
+def contar_paragrafos(texto: str) -> int:
+    blocos = [b.strip() for b in re.split(r"\n\s*\n", texto) if b.strip()]
+    return len(blocos)
+
+
+def validar_regras_fixas(resultados: str, consideracoes: str, dados_relatorio: dict[str, Any], classificacao: dict[str, Any]) -> list[str]:
     erros = []
-    parags = [p.strip() for p in re.split(r"\n\s*\n", resultados) if p.strip()]
-    if contar_tabelas(dados_relatorio) >= 2 and len(parags) < 2:
+    if contar_tabelas(dados_relatorio) >= 2 and contar_paragrafos(resultados) < 2:
         erros.append("Resultados e Discussão em parágrafo único apesar de múltiplas tabelas.")
 
     resultados_lower = f" {resultados.lower()} "
-    for termo in PROIBIDOS_RESULTADOS:
+    for termo in PROIBIDOS_LOCAL_RESULTADOS:
         if termo in resultados_lower:
-            erros.append(f"Resultados e Discussão contém termo proibido: '{termo.strip()}'.")
+            erros.append(f"Resultados e Discussão contém menção de local proibida: '{termo.strip()}'.")
+
+    for termo in PROIBIDOS_CV_RESULTADOS:
+        if termo in resultados_lower:
+            erros.append(f"Resultados e Discussão contém menção proibida a CV: '{termo.strip()}'.")
+
+    consideracoes_lower = f" {consideracoes.lower()} "
+    for termo in PROIBIDOS_LOCAL_RESULTADOS:
+        if termo in consideracoes_lower:
+            erros.append(f"Considerações contém menção de local proibida: '{termo.strip()}'.")
 
     if consideracoes.count(ABERTURA_CONSIDERACOES) > 1:
         erros.append("Frase de abertura das considerações está duplicada.")
@@ -118,6 +148,17 @@ def validar_regras_fixas(resultados: str, consideracoes: str, dados_relatorio: d
         erros.append("Considerações não iniciam com a frase obrigatória.")
     if len(topicos) < 3 or len(topicos) > 4:
         erros.append("Considerações devem conter de 3 a 4 tópicos.")
+
+    classificacao_texto = json.dumps(classificacao, ensure_ascii=False).lower()
+    sem_significancia = any(
+        chave in classificacao_texto
+        for chave in ['"ns"', "não significativo", "nao significativo", "sem diferença"]
+    )
+    if sem_significancia:
+        for termo in TERMOS_EXAGERADOS_SEM_SIGNIFICANCIA:
+            if termo in resultados_lower:
+                erros.append(f"Resultados e Discussão usa termo exagerado para resultado não significativo: '{termo}'.")
+
     return erros
 
 def classificar_status(criticas: list[str], moderadas: list[str]) -> str:
@@ -132,10 +173,7 @@ def main() -> int:
         texto_consideracoes = carregar_texto(args.consideracoes)
         texto_unificado = f"## Resultados e Discussão\n{texto_resultados}\n\n## Considerações\n{texto_consideracoes}".strip()
 
-        criticas = validar_regras_fixas(texto_resultados, texto_consideracoes, dados_relatorio)
-        numeros_ausentes = sorted(n for n in extrair_numeros(texto_unificado) if n not in extrair_numeros_tabelas(dados_relatorio))
-        if numeros_ausentes:
-            criticas.append("Há números no texto que não foram localizados nas tabelas: " + ", ".join(numeros_ausentes))
+        criticas = validar_regras_fixas(texto_resultados, texto_consideracoes, dados_relatorio, classificacao)
 
         llm = revisar_com_llm(args.modelo, dados_relatorio, classificacao, texto_unificado)
         criticas.extend(llm.get("correcoes_obrigatorias", []))

@@ -10,8 +10,6 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-STATUS_APROVADOS = {"aprovado", "aprovado com ressalvas"}
-
 DIR_ENTRADA_RELATORIOS = Path("entrada/relatorios_novos")
 DIR_TABELAS = Path("entrada/tabelas_extraidas")
 DIR_LOGS = Path("saida/logs_revisao")
@@ -24,7 +22,8 @@ ARQUIVO_RESUMO = DIR_LOGS / "resumo_execucao_pasta.md"
 @dataclass
 class ResultadoRelatorio:
     nome: str
-    sucesso: bool
+    sucesso_tecnico: bool
+    status_revisao: str = ""
     motivo: str = ""
 
 
@@ -109,33 +108,34 @@ def processar_relatorio(caminho_docx: Path) -> ResultadoRelatorio:
         status = extrair_status_revisao(ARQUIVO_REVISAO)
         print(f"Classificação final da revisão: {status}")
 
-        if status in STATUS_APROVADOS:
-            executar_etapa(
-                [sys.executable, "scripts/06_inserir_no_docx.py", "--docx-original", str(caminho_docx)],
-                "06 - Inserir no DOCX",
+        if status == "reprovado":
+            print(
+                "ATENÇÃO: o texto foi reprovado na revisão automática, "
+                "mas o DOCX final será gerado para revisão manual."
             )
-            return ResultadoRelatorio(caminho_docx.name, True, "Aprovado e finalizado")
 
-        return ResultadoRelatorio(
-            caminho_docx.name,
-            False,
-            f"Relatório reprovado na revisão (status: {status}).",
+        executar_etapa(
+            [sys.executable, "scripts/06_inserir_no_docx.py", "--docx-original", str(caminho_docx)],
+            "06 - Inserir no DOCX",
         )
+        return ResultadoRelatorio(caminho_docx.name, True, status, "DOCX final gerado.")
     except RuntimeError as exc:
-        return ResultadoRelatorio(caminho_docx.name, False, str(exc))
+        return ResultadoRelatorio(caminho_docx.name, False, "", str(exc))
 
 
 def escrever_resumo(resultados: list[ResultadoRelatorio], finalizados: list[str]) -> None:
     total = len(resultados)
-    sucessos = sum(1 for r in resultados if r.sucesso)
-    falhas = [r for r in resultados if not r.sucesso]
+    falhas_tecnicas = [r for r in resultados if not r.sucesso_tecnico]
+    aprovados = [r for r in resultados if r.sucesso_tecnico and r.status_revisao == "aprovado"]
+    ressalvas = [r for r in resultados if r.sucesso_tecnico and r.status_revisao == "aprovado com ressalvas"]
+    reprovados_gerados = [r for r in resultados if r.sucesso_tecnico and r.status_revisao == "reprovado"]
 
     linhas = [
         "# Resumo da execução em lote",
         "",
         f"- Total de arquivos encontrados: {total}",
-        f"- Total processado com sucesso: {sucessos}",
-        f"- Total com falha: {len(falhas)}",
+        f"- Total com DOCX final gerado: {len(aprovados) + len(ressalvas) + len(reprovados_gerados)}",
+        f"- Total com erro técnico: {len(falhas_tecnicas)}",
         "",
         "## Arquivos gerados em saida/relatorios_finalizados",
     ]
@@ -145,9 +145,15 @@ def escrever_resumo(resultados: list[ResultadoRelatorio], finalizados: list[str]
     else:
         linhas.append("- Nenhum arquivo gerado.")
 
-    linhas.extend(["", "## Arquivos com erro"])
-    if falhas:
-        linhas.extend(f"- {falha.nome}: {falha.motivo}" for falha in falhas)
+    linhas.extend(["", "## Revisão aprovada"])
+    linhas.extend([f"- {r.nome}" for r in aprovados] or ["- Nenhum arquivo nesta categoria."])
+    linhas.extend(["", "## Revisão aprovada com ressalvas"])
+    linhas.extend([f"- {r.nome}" for r in ressalvas] or ["- Nenhum arquivo nesta categoria."])
+    linhas.extend(["", "## Gerado com reprovação para revisão manual"])
+    linhas.extend([f"- {r.nome}: Gerado com reprovação para revisão manual." for r in reprovados_gerados] or ["- Nenhum arquivo nesta categoria."])
+    linhas.extend(["", "## Arquivos com erro técnico"])
+    if falhas_tecnicas:
+        linhas.extend(f"- {falha.nome}: {falha.motivo}" for falha in falhas_tecnicas)
     else:
         linhas.append("- Nenhum erro.")
 
@@ -182,8 +188,10 @@ def main() -> int:
         resultado = processar_relatorio(docx)
         resultados.append(resultado)
 
-        if resultado.sucesso:
+        if resultado.sucesso_tecnico:
             print(f"Concluído: {docx.name}")
+            if resultado.status_revisao == "reprovado":
+                print("Status: Gerado com reprovação para revisão manual.")
         else:
             print(f"Falhou: {docx.name}")
             print(f"Motivo: {resultado.motivo}")
@@ -192,13 +200,18 @@ def main() -> int:
     escrever_resumo(resultados, finalizados)
 
     total = len(resultados)
-    sucessos = sum(1 for r in resultados if r.sucesso)
-    falhas = [r for r in resultados if not r.sucesso]
+    falhas_tecnicas = [r for r in resultados if not r.sucesso_tecnico]
+    aprovados = [r for r in resultados if r.sucesso_tecnico and r.status_revisao == "aprovado"]
+    ressalvas = [r for r in resultados if r.sucesso_tecnico and r.status_revisao == "aprovado com ressalvas"]
+    reprovados_gerados = [r for r in resultados if r.sucesso_tecnico and r.status_revisao == "reprovado"]
 
     print("\nResumo final:")
     print(f"- Total de arquivos encontrados: {total}")
-    print(f"- Total processado com sucesso: {sucessos}")
-    print(f"- Total com falha: {len(falhas)}")
+    print(f"- Total com DOCX final gerado: {len(aprovados) + len(ressalvas) + len(reprovados_gerados)}")
+    print(f"- Total com erro técnico: {len(falhas_tecnicas)}")
+    print(f"- Revisão aprovada: {len(aprovados)}")
+    print(f"- Revisão aprovada com ressalvas: {len(ressalvas)}")
+    print(f"- Gerado com reprovação para revisão manual: {len(reprovados_gerados)}")
     print("- Arquivos gerados em saida/relatorios_finalizados:")
     if finalizados:
         for nome in finalizados:
@@ -206,13 +219,13 @@ def main() -> int:
     else:
         print("  - Nenhum arquivo gerado.")
 
-    if falhas:
-        print("- Arquivos com erro:")
-        for falha in falhas:
+    if falhas_tecnicas:
+        print("- Arquivos com erro técnico:")
+        for falha in falhas_tecnicas:
             print(f"  - {falha.nome}: {falha.motivo}")
 
     print(f"\nResumo detalhado salvo em: {ARQUIVO_RESUMO}")
-    return 0 if not falhas else 1
+    return 0 if not falhas_tecnicas else 1
 
 
 if __name__ == "__main__":

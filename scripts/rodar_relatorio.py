@@ -8,8 +8,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-STATUS_APROVADOS = {"aprovado", "aprovado com ressalvas"}
-
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Executa o fluxo completo de geração de relatório.")
@@ -73,17 +71,19 @@ def main() -> int:
         status = extrair_status_revisao(revisao_path)
         print(f"\nClassificação final da revisão: {status}")
 
-        if status in STATUS_APROVADOS:
-            executar_etapa(
-                [sys.executable, "scripts/06_inserir_no_docx.py", "--docx-original", str(caminho_docx)],
-                "06 - Inserir no DOCX",
+        if status == "reprovado":
+            print(
+                "\nATENÇÃO: o texto foi reprovado na revisão automática, "
+                "mas o DOCX final será gerado para revisão manual."
             )
-            print("\nFluxo concluído: Word final gerado com sucesso.")
-            return 0
 
-        print("\nFluxo encerrado: relatório reprovado. Word final não será gerado.")
-        print(f"Consulte o relatório de revisão em: {revisao_path}")
-        return 1
+        executar_etapa(
+            [sys.executable, "scripts/06_inserir_no_docx.py", "--docx-original", str(caminho_docx)],
+            "06 - Inserir no DOCX",
+        )
+        print("\nFluxo concluído: Word final gerado com sucesso.")
+        print(f"Status da revisão automática: {status}")
+        return 0
     except RuntimeError as exc:
         print(f"Erro: {exc}", file=sys.stderr)
         return 1
